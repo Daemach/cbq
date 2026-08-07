@@ -113,9 +113,39 @@ component accessors="true" extends="AbstractQueueProvider" {
 			if ( structKeyExists( job, "after" ) ) {
 				job.after();
 			}
-			afterJobRun( job, pool );
 
-			ensureSuccessfulBatchJobIsRecorded( job, pool );
+			var stillOwnsJob = true;
+			try {
+				var ownershipResult = afterJobRun( job, pool );
+				stillOwnsJob = isNull( ownershipResult ) ? true : ownershipResult;
+			} catch ( any afterJobRunException ) {
+				// The job itself already succeeded. A failing completion write must not
+				// fall through to the failure path below — that would release or fail
+				// (and re-run) work that completed. Ownership is unproven, so skip the
+				// success side effects and record the problem loudly.
+				logSideEffectFailure(
+					"afterJobRun",
+					job,
+					afterJobRunException
+				);
+				stillOwnsJob = false;
+			}
+
+			if ( stillOwnsJob ) {
+				try {
+					ensureSuccessfulBatchJobIsRecorded( job, pool );
+				} catch ( any sideEffectException ) {
+					logSideEffectFailure(
+						"ensureSuccessfulBatchJobIsRecorded",
+						job,
+						sideEffectException
+					);
+				}
+			} else if ( log.canWarn() ) {
+				log.warn(
+					"Job ###job.getId()# completed, but this worker no longer owns it (or ownership could not be confirmed). Skipping batch recording — the owning worker is responsible for it."
+				);
+			}
 		} catch ( any e ) {
 			// log failed job
 			if ( log.canError() ) {
@@ -145,8 +175,26 @@ component accessors="true" extends="AbstractQueueProvider" {
 
 				variables.interceptorService.announce( "onCBQJobFailed", { "job" : job, "exception" : e } );
 
-				afterJobFailed( job.getId(), job );
-				ensureFailedBatchJobIsRecorded( job, e );
+				var stillOwnsFailedJob = true;
+				try {
+					var failedOwnershipResult = afterJobFailed( job.getId(), job );
+					stillOwnsFailedJob = isNull( failedOwnershipResult ) ? true : failedOwnershipResult;
+				} catch ( any afterJobFailedException ) {
+					logSideEffectFailure(
+						"afterJobFailed",
+						job,
+						afterJobFailedException
+					);
+					stillOwnsFailedJob = false;
+				}
+
+				if ( stillOwnsFailedJob ) {
+					ensureFailedBatchJobIsRecorded( job, e );
+				} else if ( log.canWarn() ) {
+					log.warn(
+						"Job ###job.getId()# failed, but this worker no longer owns it (or ownership could not be confirmed). Skipping batch failure recording — the owning worker is responsible for it."
+					);
+				}
 
 				variables.log.debug( "Deleted job ###job.getId()# after maximum failed attempts." );
 

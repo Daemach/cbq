@@ -46,6 +46,13 @@ component accessors="true" {
 	public void function recordSuccessfulJob( required string jobId ) {
 		var counts = getRepository().decrementPendingJobs( variables.id, arguments.jobId );
 
+		// A job already recorded (a duplicate delivery or a retried side effect)
+		// must not move counters again or re-fire batch lifecycle jobs.
+		param counts.alreadyRecorded = false;
+		if ( counts.alreadyRecorded ) {
+			return;
+		}
+
 		if ( counts.pendingJobs != 0 ) {
 			return;
 		}
@@ -65,6 +72,11 @@ component accessors="true" {
 
 	public void function recordFailedJob( required string jobId, required any error ) {
 		var counts = getRepository().incrementFailedJobs( variables.id, arguments.jobId );
+
+		param counts.alreadyRecorded = false;
+		if ( counts.alreadyRecorded ) {
+			return;
+		}
 
 		if ( counts.failedJobs == 1 ) {
 			if ( !allowsFailures() ) {

@@ -67,6 +67,7 @@ component singleton accessors="true" {
 					"successfulJobs" : 0,
 					"failedJobs" : 0,
 					"failedJobIds" : "[]",
+					"processedJobIds" : "[]",
 					"options" : serializeJSON( arguments.batch.getOptions() ),
 					"createdDate" : variables.getCurrentUnixTimestamp()
 				},
@@ -107,10 +108,22 @@ component singleton accessors="true" {
 				throw( type = "cbq.BatchNotFound", message = "No batch found for id [#arguments.batchId#]" );
 			}
 
+			var processedJobIds = parseProcessedJobIds( data );
+			if ( arrayFind( processedJobIds, arguments.jobId ) ) {
+				return {
+					"pendingJobs" : data.pendingJobs,
+					"failedJobs" : data.failedJobs,
+					"allJobsHaveRanExactlyOnce" : data.pendingJobs == 0,
+					"alreadyRecorded" : true
+				};
+			}
+			processedJobIds.append( arguments.jobId );
+
 			var updatedValues = {
 				"pendingJobs" : data.pendingJobs - 1,
 				"successfulJobs" : data.successfulJobs + 1,
-				"failedJobs" : data.failedJobs
+				"failedJobs" : data.failedJobs,
+				"processedJobIds" : serializeJSON( processedJobIds )
 			};
 
 			qb.table( variables.batchTableName )
@@ -120,7 +133,8 @@ component singleton accessors="true" {
 			return {
 				"pendingJobs" : data.pendingJobs - 1,
 				"failedJobs" : data.failedJobs,
-				"allJobsHaveRanExactlyOnce" : ( data.pendingJobs - 1 ) == 0
+				"allJobsHaveRanExactlyOnce" : ( data.pendingJobs - 1 ) == 0,
+				"alreadyRecorded" : false
 			};
 		}
 	}
@@ -137,10 +151,22 @@ component singleton accessors="true" {
 				throw( type = "cbq.BatchNotFound", message = "No batch found for id [#arguments.batchId#]" );
 			}
 
+			var processedJobIds = parseProcessedJobIds( data );
+			if ( arrayFind( processedJobIds, arguments.jobId ) ) {
+				return {
+					"pendingJobs" : data.pendingJobs,
+					"failedJobs" : data.failedJobs,
+					"allJobsHaveRanExactlyOnce" : data.pendingJobs == 0,
+					"alreadyRecorded" : true
+				};
+			}
+			processedJobIds.append( arguments.jobId );
+
 			var updatedValues = {
 				"pendingJobs" : data.pendingJobs - 1,
 				"failedJobs" : data.failedJobs + 1,
-				"failedJobIds" : serializeJSON( deserializeJSON( data.failedJobIds ).append( arguments.jobId ) )
+				"failedJobIds" : serializeJSON( deserializeJSON( data.failedJobIds ).append( arguments.jobId ) ),
+				"processedJobIds" : serializeJSON( processedJobIds )
 			};
 
 			qb.table( variables.batchTableName )
@@ -150,9 +176,24 @@ component singleton accessors="true" {
 			return {
 				"pendingJobs" : data.pendingJobs - 1,
 				"failedJobs" : data.failedJobs + 1,
-				"allJobsHaveRanExactlyOnce" : ( data.pendingJobs - 1 ) == 0
+				"allJobsHaveRanExactlyOnce" : ( data.pendingJobs - 1 ) == 0,
+				"alreadyRecorded" : false
 			};
 		}
+	}
+
+	/**
+	 * The ledger of job ids already recorded against this batch (success or failure).
+	 * Tolerates rows created before the processedJobIds migration.
+	 */
+	private array function parseProcessedJobIds( required struct data ) {
+		if ( !arguments.data.keyExists( "processedJobIds" ) ) {
+			return [];
+		}
+		if ( isNull( arguments.data.processedJobIds ) || !len( arguments.data.processedJobIds ) ) {
+			return [];
+		}
+		return deserializeJSON( arguments.data.processedJobIds );
 	}
 
 	/**

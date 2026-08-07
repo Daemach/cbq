@@ -319,22 +319,25 @@ component accessors="true" extends="AbstractQueueProvider" {
 		}
 	}
 
-	private void function afterJobRun( required AbstractJob job, required WorkerPool pool ) {
-		markJobAsCompletedById( arguments.job.getId(), arguments.pool );
+	private boolean function afterJobRun( required AbstractJob job, required WorkerPool pool ) {
+		// The completion write is scoped to reservedBy = this pool. Zero rows means
+		// another worker owns this job now — report that so success side effects
+		// (batch recording, chain dispatch) are not run twice.
+		return markJobAsCompletedById( arguments.job.getId(), arguments.pool ) == 1;
 		// deleteJobById( arguments.job.getId() );
 	}
 
-	private void function afterJobFailed(
+	private boolean function afterJobFailed(
 		required any id,
 		AbstractJob job,
 		WorkerPool pool
 	) {
-		markJobAsFailedById( arguments.id, isNull( arguments.pool ) ? javacast( "null", "" ) : arguments.pool );
+		return markJobAsFailedById( arguments.id, isNull( arguments.pool ) ? javacast( "null", "" ) : arguments.pool ) == 1;
 		// deleteJobById( arguments.id );
 	}
 
-	private void function markJobAsCompletedById( required numeric id, required WorkerPool pool ) {
-		newQuery()
+	private numeric function markJobAsCompletedById( required numeric id, required WorkerPool pool ) {
+		return newQuery()
 			.table( variables.tableName )
 			.where( "id", arguments.id )
 			.where( "reservedBy", arguments.pool.getUniqueId() )
@@ -342,7 +345,9 @@ component accessors="true" extends="AbstractQueueProvider" {
 				q.whereNull( "completedDate" );
 				q.whereNull( "failedDate" );
 			} )
-			.update( values = { "completedDate" : getCurrentUnixTimestamp() }, options = variables.defaultQueryOptions );
+			.update( values = { "completedDate" : getCurrentUnixTimestamp() }, options = variables.defaultQueryOptions )
+			.result
+			.recordCount;
 	}
 
 	public void function forceFailJob( required any id, WorkerPool pool ) {
@@ -352,8 +357,8 @@ component accessors="true" extends="AbstractQueueProvider" {
 			.update( values = { "failedDate" : getCurrentUnixTimestamp() }, options = variables.defaultQueryOptions );
 	}
 
-	private void function markJobAsFailedById( required numeric id, WorkerPool pool ) {
-		newQuery()
+	private numeric function markJobAsFailedById( required numeric id, WorkerPool pool ) {
+		return newQuery()
 			.table( variables.tableName )
 			.where( "id", arguments.id )
 			.when( !isNull( arguments.pool ), ( q ) => {
@@ -363,7 +368,9 @@ component accessors="true" extends="AbstractQueueProvider" {
 				q.whereNull( "completedDate" );
 				q.whereNull( "failedDate" );
 			} )
-			.update( values = { "failedDate" : getCurrentUnixTimestamp() }, options = variables.defaultQueryOptions );
+			.update( values = { "failedDate" : getCurrentUnixTimestamp() }, options = variables.defaultQueryOptions )
+			.result
+			.recordCount;
 	}
 
 	private any function buildMaxAttemptsReachedException( required AbstractJob job, required numeric maxAttempts ) {

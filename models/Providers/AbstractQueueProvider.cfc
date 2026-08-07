@@ -160,10 +160,48 @@ component accessors="true" {
 				if ( structKeyExists( job, "after" ) ) {
 					job.after();
 				}
-				afterJobRun( job, pool );
 
-				ensureSuccessfulBatchJobIsRecorded( job, pool );
-				dispatchNextJobInChain( job, pool );
+				var stillOwnsJob = true;
+				try {
+					var ownershipResult = afterJobRun( job, pool );
+					stillOwnsJob = isNull( ownershipResult ) ? true : ownershipResult;
+				} catch ( any afterJobRunException ) {
+					// The job itself already succeeded. A failing completion write must
+					// not fall through to the failure path — that would release or fail
+					// (and re-run) work that completed. Ownership is unproven, so skip
+					// the success side effects below and record the problem loudly.
+					logSideEffectFailure(
+						"afterJobRun",
+						job,
+						afterJobRunException
+					);
+					stillOwnsJob = false;
+				}
+
+				if ( stillOwnsJob ) {
+					try {
+						ensureSuccessfulBatchJobIsRecorded( job, pool );
+					} catch ( any sideEffectException ) {
+						logSideEffectFailure(
+							"ensureSuccessfulBatchJobIsRecorded",
+							job,
+							sideEffectException
+						);
+					}
+					try {
+						dispatchNextJobInChain( job, pool );
+					} catch ( any sideEffectException ) {
+						logSideEffectFailure(
+							"dispatchNextJobInChain",
+							job,
+							sideEffectException
+						);
+					}
+				} else if ( log.canWarn() ) {
+					log.warn(
+						"Job ###job.getId()# completed, but this worker no longer owns it (or ownership could not be confirmed). Skipping batch recording and chain dispatch — the owning worker is responsible for those side effects."
+					);
+				}
 
 				if ( !isNull( afterJobHook ) && ( isCustomFunction( afterJobHook ) || isClosure( afterJobHook ) ) ) {
 					try {
@@ -313,8 +351,14 @@ component accessors="true" {
 		return;
 	}
 
-	private void function afterJobRun( required AbstractJob job, required WorkerPool pool ) {
-		return;
+	/**
+	 * Runs after a job completes successfully. Providers that can verify delivery
+	 * ownership (e.g. a guarded terminal write, a broker ack) should return whether
+	 * this worker still owned the job — success side effects (batch recording,
+	 * chain dispatch) only run when it did. Returning nothing is treated as true.
+	 */
+	private boolean function afterJobRun( required AbstractJob job, required WorkerPool pool ) {
+		return true;
 	}
 
 	private void function afterJobException(
@@ -326,13 +370,18 @@ component accessors="true" {
 		return;
 	}
 
-	private void function afterJobFailed(
+	/**
+	 * Runs after a job fails terminally. Same ownership contract as afterJobRun:
+	 * return whether this worker still owned the job. Returning nothing is treated
+	 * as true.
+	 */
+	private boolean function afterJobFailed(
 		required any id,
 		AbstractJob job,
 		WorkerPool pool,
 		any exception
 	) {
-		return;
+		return true;
 	}
 
 	/**
@@ -383,13 +432,15 @@ component accessors="true" {
 			);
 		}
 
+		var stillOwnsJob = true;
 		try {
-			afterJobFailed(
+			var ownershipResult = afterJobFailed(
 				arguments.job.getId(),
 				arguments.job,
 				arguments.pool,
 				isNull( arguments.exception ) ? javacast( "null", "" ) : arguments.exception
 			);
+			stillOwnsJob = isNull( ownershipResult ) ? true : ownershipResult;
 		} catch ( any sideEffectException ) {
 			logSideEffectFailure(
 				"afterJobFailed",
@@ -401,18 +452,25 @@ component accessors="true" {
 				forceFailJob( arguments.job.getId(), arguments.pool );
 			} catch ( any ignored ) {
 			}
+			stillOwnsJob = false;
 		}
 
-		try {
-			ensureFailedBatchJobIsRecorded(
-				arguments.job,
-				isNull( arguments.exception ) ? javacast( "null", "" ) : arguments.exception
-			);
-		} catch ( any sideEffectException ) {
-			logSideEffectFailure(
-				"ensureFailedBatchJobIsRecorded",
-				arguments.job,
-				sideEffectException
+		if ( stillOwnsJob ) {
+			try {
+				ensureFailedBatchJobIsRecorded(
+					arguments.job,
+					isNull( arguments.exception ) ? javacast( "null", "" ) : arguments.exception
+				);
+			} catch ( any sideEffectException ) {
+				logSideEffectFailure(
+					"ensureFailedBatchJobIsRecorded",
+					arguments.job,
+					sideEffectException
+				);
+			}
+		} else if ( log.canWarn() ) {
+			log.warn(
+				"Job ###arguments.job.getId()# failed, but this worker no longer owns it (or ownership could not be confirmed). Skipping batch failure recording — the owning worker is responsible for it."
 			);
 		}
 	}
